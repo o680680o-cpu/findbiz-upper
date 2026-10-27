@@ -47,6 +47,8 @@ _last_request = 0.0
 _gcis_blocked = False
 _director_lock = threading.Lock()
 _director_conn: sqlite3.Connection | None = None
+_manager_lock = threading.Lock()
+_manager_conn: sqlite3.Connection | None = None
 _session = requests.Session()
 _session.headers["User-Agent"] = "findbiz-upper/1.0"
 
@@ -342,8 +344,51 @@ def _api_directors(company_id: str) -> list[dict]:
     return rows
 
 
+def _manager_index() -> sqlite3.Connection | None:
+    global _manager_conn
+    if _manager_conn is not None:
+        return _manager_conn
+    with _manager_lock:
+        if _manager_conn is not None:
+            return _manager_conn
+        gz_path = Path(__file__).resolve().parent / "data" / "managers.sqlite.gz"
+        db_path = Path("/tmp/findbiz-managers.sqlite")
+        if gz_path.is_file() and not db_path.is_file():
+            with gzip.open(gz_path, "rb") as source, db_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+        if not db_path.is_file():
+            return None
+        _manager_conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
+        return _manager_conn
+
+
+def _indexed_managers(company_id: str) -> list[dict] | None:
+    """名冊打得開就回傳這家公司的經理人，沒有登記就是空名單。名冊打不開才回傳 None。"""
+    connection = _manager_index()
+    if connection is None:
+        return None
+    try:
+        found = connection.execute(
+            "SELECT name FROM managers WHERE company_id = ? ORDER BY rowid",
+            (company_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    rows = []
+    for (name,) in found:
+        person = (name or "").strip()
+        if not person or _masked_name(person):
+            continue
+        rows.append({"姓名": person, "職稱": "經理人"})
+    return rows
+
+
 def _apply_official_officers(data: dict, company_id: str) -> None:
-    """g0v 的董監事會落後。改用經濟部最新登記，線上查不到就用每月名冊。"""
+    """每一家公司都用經濟部登記。即時名單有回應就用即時名單，否則用每月全國名冊。"""
     profile = _gcis_rows(GCIS_COMPANY, company_id)
     if profile:
         representative = str(profile[0].get("Responsible_Name") or "").strip()
@@ -360,6 +405,9 @@ def _apply_official_officers(data: dict, company_id: str) -> None:
         if item["職稱"] in ("董事長", "負責人", "代表人"):
             data["代表人姓名"] = item["姓名"]
             break
+    managers = _indexed_managers(company_id)
+    if managers is not None:
+        data["經理人名單"] = managers
 
 
 def show_company(company_id: str) -> dict | None:
