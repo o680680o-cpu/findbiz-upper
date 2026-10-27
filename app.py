@@ -20,6 +20,9 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 G0V = "https://company.g0v.ronny.tw/api"
+GCIS = "https://data.gcis.nat.gov.tw/od/data/api"
+GCIS_COMPANY = "5F64D864-61CB-4D0D-8AD9-492047CC1EA6"
+GCIS_DIRECTORS = "4E5F7653-1B91-4DDC-99D5-468530FAE396"
 FINDBIZ_DETAIL = "https://findbiz.nat.gov.tw/fts/query/QueryCmpyDetail/queryCmpyDetail.do"
 TRADE_URL = "https://fbfh.trade.gov.tw/opendata/companyData.csv"
 TRADE_INDEX = Path(__file__).resolve().parent / "data" / "trade_english.tsv"
@@ -238,6 +241,57 @@ def location_of(item: dict) -> str:
     return ""
 
 
+def _masked_name(name: str) -> bool:
+    return any(mark in name for mark in ("○", "◯", "〇", "●", "*", "＊"))
+
+
+def _gcis_rows(dataset: str, company_id: str) -> list[dict]:
+    payload = _get_json(
+        f"{GCIS}/{dataset}",
+        {
+            "$format": "json",
+            "$filter": f"Business_Accounting_NO eq {company_id}",
+            "$skip": "0",
+            "$top": "200",
+        },
+    )
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _apply_official_officers(data: dict, company_id: str) -> None:
+    """g0v 的董監事會落後。經濟部這份每小時更新，有資料就改用它。"""
+    try:
+        profile = _gcis_rows(GCIS_COMPANY, company_id)
+    except requests.RequestException:
+        profile = []
+    if profile:
+        representative = str(profile[0].get("Responsible_Name") or "").strip()
+        if representative and not _masked_name(representative):
+            data["代表人姓名"] = representative
+        status = str(profile[0].get("Company_Status_Desc") or "").strip()
+        if status:
+            data["登記現況"] = status
+    try:
+        directors = _gcis_rows(GCIS_DIRECTORS, company_id)
+    except requests.RequestException:
+        return
+    rows = []
+    for item in directors:
+        person = str(item.get("Person_Name") or "").strip()
+        if not person or _masked_name(person):
+            return
+        rows.append({
+            "姓名": person,
+            "職稱": str(item.get("Person_Position_Name") or "董監事").strip() or "董監事",
+            "出資額": item.get("Person_Shareholding"),
+            "所代表法人": str(item.get("Juristic_Person_Name") or "").strip(),
+        })
+    if rows:
+        data["董監事名單"] = rows
+
+
 def show_company(company_id: str) -> dict | None:
     company_id = normalize_id(company_id)
     if not company_id:
@@ -253,6 +307,7 @@ def show_company(company_id: str) -> dict | None:
         data = None
     if isinstance(data, dict):
         data["統一編號"] = company_id
+        _apply_official_officers(data, company_id)
     with _cache_lock:
         _cache[company_id] = data or {}
     return data
