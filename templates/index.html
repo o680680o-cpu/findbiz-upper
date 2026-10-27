@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>上層關係公司與人員名單</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="eyebrow">經濟部商工登記公示資料</p>
+      <h1>上層關係公司與人員名單</h1>
+      <p class="lead">一次可輸入多家公司。名單會帶出這些公司，以及董監事所代表的上層法人。同一家公司只留一列，同一個人只佔一個欄位。</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <form id="searchForm" class="panel">
+      <label for="keyword">公司名稱或統一編號，一行一家</label>
+      <textarea id="keyword" name="keyword" required placeholder="一行一家，也可以用逗號分開&#10;國泰人壽保險&#10;70827406&#10;佳誼實業股份有限公司"></textarea>
+      <div class="row">
+        <label class="depth" for="depth">往上幾層
+          <select id="depth">
+            <option value="0">只查這幾家公司</option>
+            <option value="1">1 層</option>
+            <option value="2">2 層</option>
+            <option value="3">3 層</option>
+            <option value="all" selected>全部上層</option>
+          </select>
+        </label>
+        <button id="submitBtn" type="submit">查詢</button>
+      </div>
+      <p class="hint">一次最多 15 家。名稱請盡量輸入登記全名。Excel 每一列是一家公司；人員只寫姓名，第一格是負責人，後面依登記順序接其他姓名。有章程外文名稱，或出進口廠商英文名稱時，會在該公司正下方多一列，只顯示英文名稱。</p>
+    </form>
+
+    <p id="status" class="status" hidden></p>
+    <p id="error" class="error" hidden></p>
+
+    <p id="skipped" class="status" hidden></p>
+
+    <section id="picker" class="panel" hidden>
+      <h2>請確認公司</h2>
+      <p id="pickerHint" class="hint"></p>
+      <div id="readyList" class="ready"></div>
+      <div id="pickerList" class="picker"></div>
+      <button id="confirmBtn" type="button">查詢所選公司</button>
+    </section>
+
+    <section id="result" hidden>
+      <div class="result-bar">
+        <div id="summary" class="summary"></div>
+        <button id="exportBtn" type="button" class="export">匯出 Excel</button>
+      </div>
+      <p id="notes" class="notes" hidden></p>
+
+      <section class="block">
+        <div class="block-head">
+          <h2>公司與人員對照</h2>
+          <span id="matrixCount" class="count"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="matrix">
+            <thead id="matrixHead"></thead>
+            <tbody id="matrixBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <p>公司與人員來自 <a href="https://findbiz.nat.gov.tw/fts/query/QueryBar/queryInit.do" target="_blank" rel="noopener">經濟部商工登記公示資料查詢</a>，經 g0v 台灣公司資料整理後讀取。章程沒有外文名稱時，英文名稱改用經濟部國際貿易署公布的出進口廠商英文名稱。findbiz 網站會阻擋程式直接抓頁，所以每家公司另外附上可在瀏覽器打開的 findbiz 連結。</p>
+    </div>
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
