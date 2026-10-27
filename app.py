@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import os
 import re
+import shutil
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -41,6 +44,9 @@ _trade_lock = threading.Lock()
 _trade_names: dict[str, str] | None = None
 _trade_refresh_started = False
 _last_request = 0.0
+_gcis_blocked = False
+_director_lock = threading.Lock()
+_director_conn: sqlite3.Connection | None = None
 _session = requests.Session()
 _session.headers["User-Agent"] = "findbiz-upper/1.0"
 
@@ -246,26 +252,99 @@ def _masked_name(name: str) -> bool:
 
 
 def _gcis_rows(dataset: str, company_id: str) -> list[dict]:
-    payload = _get_json(
-        f"{GCIS}/{dataset}",
-        {
-            "$format": "json",
-            "$filter": f"Business_Accounting_NO eq {company_id}",
-            "$skip": "0",
-            "$top": "200",
-        },
-    )
-    if not isinstance(payload, list):
+    global _gcis_blocked
+    if _gcis_blocked:
         return []
-    return [row for row in payload if isinstance(row, dict)]
+    try:
+        _throttle()
+        response = _session.get(
+            f"{GCIS}/{dataset}",
+            params={
+                "$format": "json",
+                "$filter": f"Business_Accounting_NO eq {company_id}",
+                "$skip": "0",
+                "$top": "200",
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        _gcis_blocked = True
+        return []
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    text = payload if isinstance(payload, str) else str(payload)
+    if "非授權" in text or "不開放" in text:
+        _gcis_blocked = True
+    return []
+
+
+def _director_index() -> sqlite3.Connection | None:
+    global _director_conn
+    if _director_conn is not None:
+        return _director_conn
+    with _director_lock:
+        if _director_conn is not None:
+            return _director_conn
+        gz_path = Path(__file__).resolve().parent / "data" / "directors.sqlite.gz"
+        db_path = Path("/tmp/findbiz-directors.sqlite")
+        if gz_path.is_file() and not db_path.is_file():
+            with gzip.open(gz_path, "rb") as source, db_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+        if not db_path.is_file():
+            return None
+        _director_conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
+        return _director_conn
+
+
+def _indexed_directors(company_id: str) -> list[dict]:
+    connection = _director_index()
+    if connection is None:
+        return []
+    try:
+        found = connection.execute(
+            "SELECT position, name, juristic FROM directors WHERE company_id = ? ORDER BY rowid",
+            (company_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    rows = []
+    for position, name, juristic in found:
+        person = (name or "").strip()
+        if not person or _masked_name(person):
+            continue
+        rows.append({
+            "姓名": person,
+            "職稱": (position or "董監事").strip() or "董監事",
+            "出資額": None,
+            "所代表法人": (juristic or "").strip(),
+        })
+    return rows
+
+
+def _api_directors(company_id: str) -> list[dict]:
+    rows = []
+    for item in _gcis_rows(GCIS_DIRECTORS, company_id):
+        person = str(item.get("Person_Name") or "").strip()
+        if not person or _masked_name(person):
+            return []
+        rows.append({
+            "姓名": person,
+            "職稱": str(item.get("Person_Position_Name") or "董監事").strip() or "董監事",
+            "出資額": item.get("Person_Shareholding"),
+            "所代表法人": str(item.get("Juristic_Person_Name") or "").strip(),
+        })
+    return rows
 
 
 def _apply_official_officers(data: dict, company_id: str) -> None:
-    """g0v 的董監事會落後。經濟部這份每小時更新，有資料就改用它。"""
-    try:
-        profile = _gcis_rows(GCIS_COMPANY, company_id)
-    except requests.RequestException:
-        profile = []
+    """g0v 的董監事會落後。改用經濟部最新登記，線上查不到就用每月名冊。"""
+    profile = _gcis_rows(GCIS_COMPANY, company_id)
     if profile:
         representative = str(profile[0].get("Responsible_Name") or "").strip()
         if representative and not _masked_name(representative):
@@ -273,23 +352,14 @@ def _apply_official_officers(data: dict, company_id: str) -> None:
         status = str(profile[0].get("Company_Status_Desc") or "").strip()
         if status:
             data["登記現況"] = status
-    try:
-        directors = _gcis_rows(GCIS_DIRECTORS, company_id)
-    except requests.RequestException:
+    directors = _api_directors(company_id) or _indexed_directors(company_id)
+    if not directors:
         return
-    rows = []
+    data["董監事名單"] = directors
     for item in directors:
-        person = str(item.get("Person_Name") or "").strip()
-        if not person or _masked_name(person):
-            return
-        rows.append({
-            "姓名": person,
-            "職稱": str(item.get("Person_Position_Name") or "董監事").strip() or "董監事",
-            "出資額": item.get("Person_Shareholding"),
-            "所代表法人": str(item.get("Juristic_Person_Name") or "").strip(),
-        })
-    if rows:
-        data["董監事名單"] = rows
+        if item["職稱"] in ("董事長", "負責人", "代表人"):
+            data["代表人姓名"] = item["姓名"]
+            break
 
 
 def show_company(company_id: str) -> dict | None:
